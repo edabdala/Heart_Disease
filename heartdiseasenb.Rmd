@@ -1,0 +1,342 @@
+---
+title: "Predicting Heart Disease with R and Caret"
+author: "Eduardo Abdala"
+output:
+  pdf_document: default
+  html_document: 
+    theme: paper
+  html_notebook: default
+---
+
+```{r packages, include=FALSE}
+library(tidyverse)
+library(caret)
+library(reshape2)
+library(wesanderson)
+library(ggthemes)
+library(e1071)
+library(randomForest)
+library(stats)
+```
+
+## Introduction
+
+Diagnosing disease and being able to take preventative measures is no easy task. When we talk about heart disease, we are usually told to eat healthier, exercise, and minimize stress. However, every person is different and a more targeted approach can improve patient outcomes. Clinicians and healthcare managers can leverage machine learning to improve patient care in all aspects of the service life-cycle.
+
+## Problem
+
+Diagnosing heart disease is not as easy as doing blood work and looking at an EKG. We are given a data set with de-identified patient records (detailed below) and we are tasked with creating a machine learning model that predicts if a patient has heart disease.
+
+## Project Goals
+
+Predict which patients are more likely to have heart disease, given a number of possible predictors. This tool would be used to support and streamline the decision making process for medical professionals. The following steps were taken:
+
+1.  Provide exploratory data analysis
+
+2.  Provide an overview of the data with visualizations
+
+3.  Preprocess the data set (partition, encode categorical features, and normalize)
+
+4.  Train and test different classification machine learning algorithms
+
+5.  Provide performance metrics and interpret the results.
+
+------------------------------------------------------------------------
+
+## Description of the Data
+
+This data set is taken from [kaggle.com](https://www.kaggle.com/) and sourced from the [UC Irvine Machine Learning Repository](https://archive.ics.uci.edu/ml/datasets/Heart+Disease). We have a data set of n = 303 with 13 features and one target column used to train a classifier machine learning algorithm.
+
+The features are as follows:
+
+1.  age
+2.  sex (male = 1, female = 0)
+3.  cp = chest pain type (values 0-3)
+4.  trestbps = resting blood pressure (mm Hg)
+5.  chol = serum cholesterol (mg/dl)
+6.  fbs = fasting blood sugar (\> 120 mg/dl)
+7.  restecg = resting ECG results (values 0-2)
+8.  thalach = max heart rate achieved
+9.  exang = exercised induced angina
+10. oldpeak = ST depression induced by exercise
+11. slope = slope of the peak exercise ST segment (values 0-2)
+12. ca = number of major vessels colored by flouroscopy (values 0-4)
+13. thal: 1 = normal, 2 = fixed defect, 3 = reversible defect
+14. target = presence of heart disease (absent = FALSE, present = TRUE)
+
+Analysis was done in RStudio using R v4.0.3. Package versions were managed with renv.
+
+```{r data, include=FALSE}
+
+# check if model performs better with factor data types on sex, fbs, exang, restecg
+
+heart <- read_csv("heart.csv", col_types = cols(
+  cp = col_factor(levels = c("0", "1", "2", "3")),
+  slope = col_factor(levels = c("0", "1", "2")),
+  thal = col_factor(levels = c("0", "1", "2", "3")),
+  target = col_factor(levels = c("0","1")),
+  sex = col_factor(levels = c("0", "1")),
+  fbs = col_factor(),
+  restecg = col_factor(),
+  exang = col_factor(),
+  ca = col_factor()))
+
+heart <- heart %>% 
+  mutate(target = fct_recode(target,
+                             "negative" = "0",
+                             "positive" = "1"))
+
+heart <- heart %>%
+  mutate(sex = fct_recode(sex,
+                          "male" = "1",
+                          "female" = "0"))
+```
+
+```{r}
+dplyr::glimpse(heart)
+```
+
+Below is an overview of our data set. This view is helpful for us to see feature distributions, class imbalances in our target column (which can influence what we do in preprocessing and algorithm selection), and get a feel for variable distributions. I renamed the target and sex columns to make them easier to interpret. Instead of 0 and 1, words are used (negative, positive, male, female).
+
+```{r}
+summary(heart)
+```
+
+Grouping our patients by sex, we find that our sample set has a large number of women with heart disease, compared to men. This is an interesting find that could be used in our predictions. An important characteristic of a dataset to analyze when solving classification problems is class imbalance. Moreover, the variable that you are trying to pick should be as balanced as possible between the different possible outcomes. We calculate the percentage of patients with heart disease to be 54.46% and those without to be 45.54%. This is not considered imbalanced. In other datasets, one class can be significantly over-represented in the sample. making it more difficult for your algorithm to learn the characteristics of the underrepresented class. This can be toned down by upsampling or downsampling, though I don't suspect that will yield significant model improvements here.
+
+```{r}
+
+# clean with dplyr
+heart %>%
+  count(target, sex)
+```
+
+```{r echo = 2:8}
+target_counts <- heart %>%
+                  count(target)
+
+targetsex_counts <- heart %>%
+                      count(target, sex)
+
+print(c("Percent of people with heart disease:",paste(round(target_counts$n[2]/nrow(heart)*100, 2), "%", sep = "")), quote = FALSE)
+
+print(c("Percent of people without heart disease:",paste(round(target_counts$n[1]/nrow(heart)*100, 2), "%", sep = "")), quote = FALSE)
+
+print(c("Percent of men with heart disease:",paste(round(targetsex_counts$n[4]/(targetsex_counts$n[2]+targetsex_counts$n[4])*100, 2), "%", sep = "")), quote = FALSE)
+
+print(c("Percent of women with heart disease:", paste(round((targetsex_counts$n[3]/(targetsex_counts$n[1]+targetsex_counts$n[3]))*100, 2), "%", sep = "")), quote = FALSE)
+
+print(c("Overall percent male in sample:", paste(round((targetsex_counts$n[2]+targetsex_counts$n[4])/nrow(heart)*100,2), "%", sep = "")), quote = FALSE)
+
+print(c("Overall percent female in sample:", paste(round((targetsex_counts$n[1]+targetsex_counts$n[3])/nrow(heart)*100,2),"%", sep = "")), quote = FALSE)
+```
+
+Here, we examine the difference in mean values for the continuous variables to see if any stand out (chol, thalach, and oldpeak). We also see that people with heart disease were usually a few years younger. We usually think that you are more susceptible to heart disease as you get older. While there are differences in means in this sample, we do not know if these are due to chance. Hypothesis testing would allow us to see if there is evidence to support a real difference between the two groups. I explored if these changes were significant enough in another paper in this repository.
+
+```{r}
+meanby_target <- heart %>%
+                  group_by(target) %>%
+                  summarize_at(c("age", "trestbps", "chol", "thalach", "oldpeak"),mean)
+meanby_target
+```
+
+We could even separate the data by sex to tell us if there are differences between males and females in the mean values above for our continuous variables.
+
+```{r}
+meanby_targetsex <- heart %>%
+  group_by(target,sex) %>%
+  summarize_at(c("age", "trestbps", "chol", "thalach", "oldpeak"),mean) %>%
+  arrange(sex)
+  
+meanby_targetsex
+```
+
+```{r include=FALSE}
+crossta <- heart %>%
+            count(target, age)
+crossta
+```
+
+```{r echo=FALSE, fig.height=7, fig.width=13, warning= FALSE}
+ggplot(data = crossta, aes(factor(age), factor(n), color = factor(target))) +
+  geom_jitter(size = 5, position = "dodge") +
+  labs(title = "Prevalence of Heart Disease By Age", x=  "Age", y = "Frequency") +
+  scale_color_manual(values = wes_palette("GrandBudapest2", 2, type = "continuous"), name = "Heart Disease", labels = c("No", "Yes"))+
+  theme_economist_white(gray_bg = FALSE, horizontal = FALSE)
+```
+
+The graph above visualizes the difference in age distributions between the heart disease group and the healthy group. We again see that a number of patients with heart disease were younger, which goes against what we normally think. We can hypothesize from this graph that age will be less useful in predicting heart disease, though we will be able to visualize variable importance below.
+
+------------------------------------------------------------------------
+
+## Preprocessing
+
+We are ready to prepare our data for machine learning algorithms. We first separate our data into a set that we will use to train, or teach our computer what numbers a heart disease patient usually has, then another to test for its accuracy. We have to use a test set to make sure that the algorithm can interpret and predict using records it has never seen before. Then, we convert our qualitative variables into numbers using one-hot encoding so our computer can work with them Lastly, we normalize the data so variables like trestbps do not mathematically overpower variables like oldpeak due to the difference in magnitude.
+
+```{r Partition data}
+#partition, encode, normalize both train and test sets
+
+set.seed(100)
+trainIndex <- createDataPartition(heart$target, p = .70, list = FALSE)
+trainingSet <- heart[trainIndex,]
+testSet<- heart[-trainIndex,]
+
+dummies <- dummyVars(target ~ ., data = trainingSet)
+trainingSetX <- as.data.frame(predict(dummies, newdata = trainingSet))
+
+normModel <- preProcess(trainingSetX, method = "center")
+trainingSetX <- predict(normModel, newdata = trainingSetX)
+head(trainingSetX)
+
+trainingSet <- cbind(trainingSet$target, trainingSetX)
+names(trainingSet)[1] <- "target"
+
+testSet_dummy <- predict(dummies, testSet)
+testSet_norm <- predict(normModel, testSet_dummy)
+testSet_norm <- data.frame(testSet_norm)
+testSet <- cbind(testSet$target, testSet_norm)
+names(testSet) <- names(trainingSet)
+```
+
+```{r eval=FALSE, include=FALSE}
+
+names(caret::getModelInfo())
+```
+
+### Random Forest
+
+Here, we create a random forest object and expose it to the training set.
+
+```{r}
+set.seed(100)
+rf <- caret::train(target ~., data = trainingSet, method = "rf")
+rf
+```
+
+Our output shows a top accuracy of 82.6% without any parameter tuning (mtry). Below, we see what the model considered to be the most important factors when predicting heart disease. Highest on the list is are our thalach and oldpeak variables. The model is saying that these two variables affected the prediction output the most. A thing to note here is that this procedure likes to favor continuous variables more than discrete ones. Further collaboration with medical experts would test if this finding makes sense.
+
+We then tested the algorithm's accuracy with the test set and got 85.56% accuracy. With the confusion matrix, we can see a breakdown of where the correct and incorrect predictions were.
+
+Sensitivity is how well our model was able to identify the presence of heart disease in our patients. In its current state, the model correctly identified heart disease 92% of the time. Conversely, specificity is how often the model was able to know the patient did not have heart disease. Here, it was 78% of the time.
+
+```{r}
+varimp_RF <- varImp(rf)
+plot(varimp_RF, main = "Heart Disease Variable Importance (Random Forest)")
+
+fitted <- predict(rf, testSet)
+confusionMatrix(reference = testSet$target, data = fitted, mode = "everything", positive = "positive")
+```
+
+We can see above that our accuracy with the test dataset (patient records the model has never seen) is 85.6%. This means that we did not run in to the problem of overfitting, where predictions on the training set are much better than on new data. Then we do some parameter tuning with a 5-fold cross validation, exposing our model to many different test sets to make sure we are getting a reasonable accuracy score.
+
+```{r}
+twoClassCtrl <- trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 5,
+  savePredictions = "final",
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary
+)
+```
+
+```{r}
+set.seed(100)
+rfTL <- train(target ~., data = trainingSet, method = "rf", metric = "ROC", trControl = twoClassCtrl, tuneLength = 10)
+fittedTL <- predict(rfTL, testSet)
+confusionMatrix(reference = testSet$target, data = fittedTL, mode = "everything", positive = "positive")
+
+rfGrid <- data.frame(mtry = c(2, 5, 7, 9, 10, 11, 12, 13, 15, 17, 19))
+
+rfTG <- train(target ~., data = trainingSet, method = "rf", metric = "ROC", trControl = twoClassCtrl, tuneGrid = rfGrid)
+
+fittedTG <- predict(rfTG, testSet)
+confusionMatrix(reference = testSet$target, data = fittedTG, mode = "everything", positive = "positive")
+
+```
+
+Below are attempts to upsample and downsample as discussed earlier. We did not see performance improvements, as expected.
+
+```{r}
+downCtrl <- trainControl(
+  method = "boot",
+  number = 5,
+  savePredictions = "final",
+  classProbs = T,
+  summaryFunction = twoClassSummary,
+  sampling = "down"
+)
+upCtrl <- trainControl(
+  method = "boot",
+  number = 5,
+  savePredictions = "final",
+  classProbs = T,
+  summaryFunction = twoClassSummary,
+  sampling = "up"
+)
+
+
+rfDown <- train(target ~., data = trainingSet, method = "rf", metric = "ROC", trControl = downCtrl, tuneLength = 10)
+fittedDown <- predict(rfDown, testSet)
+confusionMatrix(reference = testSet$target, data = fittedDown, mode = "everything", positive = "positive")
+
+
+rfUp <- train(target ~., data = trainingSet, method = "rf", metric = "ROC", trControl = upCtrl, tuneLength = 10)
+fittedUp <- predict(rfUp, testSet)
+confusionMatrix(reference = testSet$target, data = fittedUp, mode = "everything", positive = "positive")
+
+```
+
+### K-Nearest Neighbors
+
+This algorithm works by looking at a patient record and finding a $k$ number of other records in the closest vicinity. For $k = 5$, the algorithm would look for the 5 nearest data points in relation to the patient it is trying to predict. If a majority of the patients in that search had heart disease, the model would predict the new patient to have heart disease.
+
+```{r}
+
+knn <- caret::train(target ~., data = trainingSet, method = "knn")
+knn
+
+
+knnGrid <- data.frame(k = c(2, 5, 7, 9, 10, 11, 12, 13, 15, 17, 19))
+
+knnTG <- train(target ~., data = trainingSet, method = "knn", metric = "ROC", trControl = twoClassCtrl, tuneGrid = knnGrid)
+
+fittedTG <- predict(knnTG, testSet)
+confusionMatrix(reference = testSet$target, data = fittedTG, mode = "everything", positive = "positive")
+```
+
+Unfortunately, this algorithm did not perform as well as random forest, even when testing for a wide range of neighbors to look for. We would keep using the random forest model for predictions.
+
+### Logistic Regression
+
+Logistic regression produces probabilities that are then used to classify a patient. Though it is similar to linear regression, logistic regression fits a non linear relationship using a logistic function rather than the common $y = \beta_0 + \beta_1X$. This allows us to use this statistical technique as a classification solution rather than a regression solution.
+
+```{r}
+
+heart_lreg <- glm(data = trainingSet, family = binomial, formula = target ~.)
+
+summary(heart_lreg)
+
+lreg_predicts <- predict(heart_lreg, testSet, type = "response")
+head(lreg_predicts)
+```
+
+```{r}
+
+lreg_predicts <- ifelse(lreg_predicts >= 0.5, 1, 0)
+head(lreg_predicts)
+
+lreg_confusion <- table(testSet$target, lreg_predicts)
+lreg_confusion
+
+sum(diag(lreg_confusion))/nrow(testSet)
+
+```
+
+Our accuracy score on the test set was 84.4% percent, lower than our random forest. Other probability thresholds were attempted to improve accuracy, but they performed worse than out .5 threshold.
+
+## Limitations
+
+While machine learning algorithms can be effective tools for predictions and pattern detection, they are not perfect and understanding their weaknesses can help you make more educated decisions. I think our accuracy would have been better if we had more patient records and other variables to consider. Further, the model's predictive power is unknown because we used the model to identify if a patient already had heart disease or not. While this can be useful in supplementing a physicians diagnosing process, there is untested applicability for a preventative use. Further study would be necessary to see if tweaks can be made to see what pre-heart disease numbers would look like.
+
+------------------------------------------------------------------------
